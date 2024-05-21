@@ -472,41 +472,49 @@ WHERE report_trial_balance_account.account_group_id = computed.account_group_id
 
     def _add_account_group_account_values(self):
         """Compute values for report_trial_balance_account group in child."""
+        # Since Postgres 14, the argument to array_cat must be
+        # anycompatiblearray instead of anyarray. See
+        # <https://www.postgresql.org/docs/14/release-14.html#id-1.11.6.13.4>.
+        # We detect the version and use the correct type as needed.
+        array_type = (
+            "anycompatiblearray" if self.env.cr.connection.server_version >= 140000
+            else "anyarray"
+        )
         query_update_account_group = """
-DROP AGGREGATE IF EXISTS array_concat_agg(anyarray);
-CREATE AGGREGATE array_concat_agg(anyarray) (
-  SFUNC = array_cat,
-  STYPE = anyarray
-);
-WITH aggr AS(WITH computed AS (WITH RECURSIVE cte AS (
-   SELECT account_group_id, account_group_id AS parent_id,
-    ARRAY[account_id]::int[] as child_account_ids
-   FROM   report_trial_balance_account
-   WHERE report_id = %s
-   GROUP BY report_trial_balance_account.id
+    DROP AGGREGATE IF EXISTS array_concat_agg({array_type});
+    CREATE AGGREGATE array_concat_agg({array_type}) (
+      SFUNC = array_cat,
+      STYPE = {array_type}
+    );
+    WITH aggr AS(WITH computed AS (WITH RECURSIVE cte AS (
+       SELECT account_group_id, account_group_id AS parent_id,
+        ARRAY[account_id]::int[] as child_account_ids
+       FROM   report_trial_balance_account
+       WHERE report_id = %s
+       GROUP BY report_trial_balance_account.id
 
-   UNION  ALL
-   SELECT c.account_group_id, p.account_group_id, ARRAY[p.account_id]::int[]
-   FROM   cte c
-   JOIN   report_trial_balance_account p USING (parent_id)
-    WHERE p.report_id = %s
-)
-SELECT account_group_id,
-    array_concat_agg(DISTINCT child_account_ids)::int[] as child_account_ids
-FROM   cte
-GROUP BY cte.account_group_id, cte.child_account_ids
-ORDER BY account_group_id
-)
-SELECT account_group_id,
-    array_concat_agg(DISTINCT child_account_ids)::int[]
-        AS child_account_ids from computed
-GROUP BY account_group_id)
-UPDATE report_trial_balance_account
-SET child_account_ids = aggr.child_account_ids
-FROM aggr
-WHERE report_trial_balance_account.account_group_id = aggr.account_group_id
-    AND report_trial_balance_account.report_id = %s
-"""
+       UNION  ALL
+       SELECT c.account_group_id, p.account_group_id, ARRAY[p.account_id]::int[]
+       FROM   cte c
+       JOIN   report_trial_balance_account p USING (parent_id)
+        WHERE p.report_id = %s
+    )
+    SELECT account_group_id,
+        array_concat_agg(DISTINCT child_account_ids)::int[] as child_account_ids
+    FROM   cte
+    GROUP BY cte.account_group_id, cte.child_account_ids
+    ORDER BY account_group_id
+    )
+    SELECT account_group_id,
+        array_concat_agg(DISTINCT child_account_ids)::int[]
+            AS child_account_ids from computed
+    GROUP BY account_group_id)
+    UPDATE report_trial_balance_account
+    SET child_account_ids = aggr.child_account_ids
+    FROM aggr
+    WHERE report_trial_balance_account.account_group_id = aggr.account_group_id
+        AND report_trial_balance_account.report_id = %s
+    """.format(array_type=array_type)
         query_update_account_params = (self.id, self.id, self.id,)
         self.env.cr.execute(query_update_account_group,
                             query_update_account_params)
